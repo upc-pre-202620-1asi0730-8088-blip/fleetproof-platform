@@ -1,0 +1,442 @@
+@startuml
+' FleetProof Backend - Complete Class Diagram (all bounded contexts)
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam shadowing false
+title FleetProof Backend - Class Diagram
+
+' =====================================================================
+' APPLICATION HOST
+' =====================================================================
+package "FleetProof" {
+  class Program << ApplicationHost >> {
+    ' Program.cs: DI, bearer token auth, rate limiting, CORS, /api/v1 routes
+  }
+}
+
+' =====================================================================
+' SHARED BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.Shared" {
+  class FleetProofDb << DbContext >> {
+    + Accounts: DbSet<Account>
+    + Vehicles: DbSet<Vehicle>
+    + Fleets: DbSet<Fleet>
+    + Assignments: DbSet<FleetAssignment>
+    # OnModelCreating(builder: ModelBuilder): void
+  }
+  interface IOwnedDocument << Interface >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Data: string
+  }
+  class OwnedDocuments << Static >> {
+    - {static} Json: JsonSerializerOptions
+    ~ {static} ConfigureDocument<T>(builder: ModelBuilder, table: string): void
+    ~ {static} Owned<T>(db: FleetProofDb, accountId: Guid): IQueryable<T>
+    ~ {static} Read<TValue>(document: IOwnedDocument): TValue
+    ~ {static} Write<TValue>(document: IOwnedDocument, value: TValue): void
+    ~ {static} List<T, TValue>(db: FleetProofDb, accountId: Guid, ct: CancellationToken): Task<TValue[]>
+  }
+  class EndpointSupport << Static >> {
+    ~ {static} AccountId(principal: ClaimsPrincipal): Guid
+    ~ {static} IsUniqueViolation(error: DbUpdateException): bool
+  }
+}
+
+' =====================================================================
+' USER MANAGEMENT BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.UserManagement" {
+  class Account << AggregateRoot >> {
+    + Id: Guid
+    + Username: string
+    + NormalizedUsername: string
+    + PasswordHash: string
+    + SessionVersion: int
+  }
+  class AccountEndpoints << Endpoints >> {
+    + {static} MapAccounts(api: RouteGroupBuilder): void
+    ~ {static} CheckSession(context: HttpContext, next: RequestDelegate): Task
+    - {static} SignUp(input: Credentials): Task<IResult>
+    - {static} SignIn(input: Credentials): Task<IResult>
+    - {static} UpdateAccount(input: AccountUpdate): Task<IResult>
+    - {static} DeleteAccount(input: AccountUpdate): Task<IResult>
+    - {static} Matches(account: Account, password: string?): bool
+    - {static} UsernamePattern(): Regex
+  }
+  class Credentials << Record >> {
+    + Username: string?
+    + Password: string?
+  }
+  class AccountUpdate << Record >> {
+    + Username: string?
+    + Password: string?
+    + CurrentPassword: string?
+  }
+  class Session << Record >> {
+    + Id: Guid
+    + Username: string
+    + Role: string
+    + Token: string
+  }
+}
+
+' =====================================================================
+' SUBSCRIPTION MANAGEMENT BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.SubscriptionManagement" {
+  class Subscription << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Service: string
+    + Plan: string
+    + Price: Money
+    + Audience: string
+    + Status: string
+    + PaymentStatus: string
+    ~ {static} Configure(builder: ModelBuilder): void
+  }
+  class Money << ValueObject >> {
+    + Amount: decimal
+    + Currency: Currency
+    + Add(other: Money): Money
+    + Subtract(other: Money): Money
+    + Multiply(factor: decimal): Money
+    + IsGreaterThan(other: Money): bool
+    + Equals(other: Money): bool
+    + ToString(): string
+    {static} + Zero(currency: Currency): Money
+  }
+  enum Currency << Enumeration >> {
+    PEN
+    USD
+  }
+  enum SubscriptionAccess << Enumeration >> {
+    NotCovered
+    Covered
+  }
+  interface ISubscriptionAccessQuery << Interface >> {
+    + FleetAccessAsync(accountId: Guid, ct: CancellationToken): Task<SubscriptionAccess>
+  }
+  class SubscriptionAccessQuery << Query >> {
+    - db: FleetProofDb
+    + FleetAccessAsync(accountId: Guid, ct: CancellationToken): Task<SubscriptionAccess>
+  }
+  class SubscriptionPlanQueries << Static >> {
+    ~ {static} HasPlan(db: FleetProofDb, accountId: Guid, service: string, ct: CancellationToken): Task<bool>
+  }
+  class SubscriptionEndpoints << Endpoints >> {
+    ~ {static} MapSubscriptions(api: RouteGroupBuilder): void
+    ~ {static} PlanRequired(): IResult
+    - {static} Save(id: Guid?, input: Input): Task<IResult>
+  }
+  class "Input" as SubscriptionInput << Record >> {
+    + Service: string?
+    + Plan: string?
+    + Status: string?
+    + PaymentStatus: string?
+    + Audience: string?
+  }
+  class "Resource" as SubscriptionResource << Record >> {
+    + Id: Guid
+    + Service: string
+    + Plan: string
+    + PriceAmount: decimal
+    + PriceCurrency: string
+    + Status: string
+    + PaymentStatus: string
+    + Audience: string
+  }
+}
+
+' =====================================================================
+' VEHICLE INFORMATION BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.VehicleInformation" {
+  class Vehicle << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Plate: string
+    + Type: string
+    + Site: string
+    + Owner: string
+    + Risk: string
+    + Monitored: bool
+  }
+  class VehicleEndpoints << Endpoints >> {
+    + {static} MapVehicles(api: RouteGroupBuilder): void
+    - {static} Create(input: Input): Task<IResult>
+    - {static} Update(id: Guid, input: Input): Task<IResult>
+    - {static} FindOwned(id: Guid, principal: ClaimsPrincipal): Task<Vehicle?>
+    - {static} Apply(input: Input, vehicle: Vehicle): bool
+    - {static} Save(db: FleetProofDb): Task<bool>
+    - {static} ToResource(vehicle: Vehicle): Resource
+    - {static} PlatePattern(): Regex
+  }
+  class "Input" as VehicleInput << Record >> {
+    + Plate: string?
+    + Type: string?
+    + Site: string?
+    + Owner: string?
+    + Risk: string?
+    + Monitored: bool
+  }
+  class "Resource" as VehicleResource << Record >> {
+    + Id: Guid
+    + Plate: string
+    + Type: string
+    + Site: string
+    + Owner: string
+    + Risk: string
+    + Monitored: bool
+  }
+}
+
+' =====================================================================
+' REPORT MANAGEMENT BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.ReportManagement" {
+  class VehicleReport << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Data: string
+  }
+  class ReportEndpoints << Endpoints >> {
+    ~ {static} MapReports(api: RouteGroupBuilder): void
+    - {static} Save(id: Guid?, input: Resource): Task<IResult>
+    - {static} DemoFindings(plate: string, date: string): Finding[]
+  }
+  class "Resource" as ReportResource << Record >> {
+    + Id: Guid
+    + VehicleId: Guid?
+    + Plate: string?
+    + Status: string?
+    + RequestedAt: DateTimeOffset?
+    + Findings: Finding[]?
+    + PaymentStatus: string?
+    + ServiceType: string?
+    + Make: string?
+    + Model: string?
+  }
+  class Finding << Record >> {
+    + Source: string?
+    + DateChecked: string?
+    + Result: string?
+    + Summary: string?
+    + Evidence: string?
+    + Simulated: bool
+  }
+}
+
+' =====================================================================
+' VEHICLE MONITORING BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.VehicleMonitoring" {
+  class VehicleWatch << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + VehicleId: Guid
+    + Active: bool
+    + Data: string
+  }
+  class MonitoringAlert << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Data: string
+  }
+  class MonitoringEndpoints << Endpoints >> {
+    ~ {static} ConfigureMonitoring(builder: ModelBuilder): void
+    ~ {static} MapMonitoring(api: RouteGroupBuilder): void
+    - {static} Save(id: Guid?, input: Watch): Task<IResult>
+    - {static} RecordAlert(input: Alert): Task<IResult>
+    - {static} Capture(vehicle: Vehicle): Dictionary<string, string>
+  }
+  class Watch << Record >> {
+    + Id: Guid
+    + VehicleId: Guid
+    + IntervalMinutes: int
+    + Status: string?
+    + Snapshot: Dictionary<string, string>?
+    + LastCheckedAt: string?
+    + NextCheckAt: string?
+  }
+  class Alert << Record >> {
+    + Id: Guid
+    + MonitoringId: Guid
+    + VehicleId: Guid
+    + Changes: Change[]?
+    + CreatedAt: DateTimeOffset?
+  }
+  class Change << Record >> {
+    + Field: string
+    + Before: string?
+    + After: string
+  }
+}
+
+' =====================================================================
+' FLEET MANAGEMENT BOUNDED CONTEXT
+' =====================================================================
+package "FleetProof.FleetManagement" {
+  class Fleet << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Name: string
+  }
+  class FleetAssignment << Entity >> {
+    + Id: Guid
+    + AccountId: Guid
+    + FleetId: Guid
+    + VehicleId: Guid
+    + Responsible: string
+  }
+  class ResolutionCase << AggregateRoot >> {
+    + Id: Guid
+    + AccountId: Guid
+    + Data: string
+  }
+  interface IFleetEntitlements << Interface >> {
+    + CanManageFleetAsync(accountId: Guid, ct: CancellationToken): Task<bool>
+  }
+  class FleetModel << Static >> {
+    ~ {static} ConfigureFleetManagement(builder: ModelBuilder): void
+  }
+  class FleetEndpoints << Endpoints >> {
+    ~ {static} MapFleetManagement(api: RouteGroupBuilder): void
+    - {static} CreateFleet(input: FleetInput): Task<IResult>
+    - {static} AssignVehicle(input: AssignmentInput): Task<IResult>
+    - {static} PlanRequired(): IResult
+    - {static} ReferenceNotFound(): IResult
+  }
+  class CaseEndpoints << Endpoints >> {
+    ~ {static} MapCases(api: RouteGroupBuilder): void
+    - {static} Save(id: Guid?, input: Resource): Task<IResult>
+  }
+  class FleetInput << Record >> {
+    + Name: string?
+  }
+  class FleetResource << Record >> {
+    + Id: Guid
+    + Name: string
+  }
+  class AssignmentInput << Record >> {
+    + FleetId: Guid
+    + VehicleId: Guid
+    + Responsible: string?
+  }
+  class AssignmentResource << Record >> {
+    + Id: Guid
+    + FleetId: Guid
+    + VehicleId: Guid
+    + Responsible: string
+  }
+  class "Resource" as CaseResource << Record >> {
+    + Id: Guid
+    + ReportId: Guid?
+    + Plate: string?
+    + Title: string?
+    + Severity: string?
+    + Status: string?
+    + Responsible: string?
+    + DueDate: string?
+    + Evidence: string?
+    + Note: string?
+  }
+}
+
+package "FleetProof.FleetManagement.Infrastructure" {
+  class SubscriptionEntitlementsAdapter << Adapter >> {
+    - subscriptions: ISubscriptionAccessQuery
+    + CanManageFleetAsync(accountId: Guid, ct: CancellationToken): Task<bool>
+  }
+}
+
+' =====================================================================
+' RELATIONSHIPS
+' =====================================================================
+
+' ---------- Application host ----------
+Program ..> FleetProofDb : registers
+Program ..> AccountEndpoints : maps
+Program ..> SubscriptionEndpoints : maps
+Program ..> VehicleEndpoints : maps
+Program ..> ReportEndpoints : maps
+Program ..> MonitoringEndpoints : maps
+Program ..> FleetEndpoints : maps
+Program ..> CaseEndpoints : maps
+
+' ---------- Shared ----------
+OwnedDocuments ..> IOwnedDocument : reads / writes
+OwnedDocuments ..> FleetProofDb : configures / queries
+
+' ---------- User Management ----------
+AccountEndpoints ..> Account : creates / updates / deletes
+AccountEndpoints ..> Credentials : receives
+AccountEndpoints ..> AccountUpdate : receives
+AccountEndpoints ..> Session : returns
+
+' ---------- Subscription Management ----------
+Subscription "1" *-- "1" Money : price >
+Money --> Currency
+Subscription "0..*" --> "1" Account : AccountId >
+SubscriptionAccessQuery ..|> ISubscriptionAccessQuery
+SubscriptionAccessQuery ..> SubscriptionPlanQueries : uses
+ISubscriptionAccessQuery ..> SubscriptionAccess : returns
+SubscriptionPlanQueries ..> Subscription : queries
+SubscriptionEndpoints ..> Subscription : creates / updates
+SubscriptionEndpoints ..> SubscriptionInput : receives
+SubscriptionEndpoints ..> SubscriptionResource : returns
+SubscriptionResource ..> Money : maps
+
+' ---------- Vehicle Information ----------
+Vehicle "0..*" --> "1" Account : AccountId >
+VehicleEndpoints ..> Vehicle : creates / updates
+VehicleEndpoints ..> VehicleInput : receives
+VehicleEndpoints ..> VehicleResource : returns
+
+' ---------- Report Management ----------
+VehicleReport ..|> IOwnedDocument
+VehicleReport "1" --> "1" ReportResource : stores as JSONB >
+ReportResource "1" *-- "0..12" Finding : contains >
+ReportResource "0..*" --> "0..1" Vehicle : VehicleId >
+ReportEndpoints ..> VehicleReport : creates / updates
+ReportEndpoints ..> ReportResource : receives / returns
+ReportEndpoints ..> Finding : generates
+
+' ---------- Vehicle Monitoring ----------
+VehicleWatch ..|> IOwnedDocument
+MonitoringAlert ..|> IOwnedDocument
+VehicleWatch "1" --> "1" Watch : stores as JSONB >
+MonitoringAlert "1" --> "1" Alert : stores as JSONB >
+Alert "1" *-- "1..*" Change : contains >
+Alert "0..*" --> "1" VehicleWatch : MonitoringId >
+VehicleWatch "0..*" --> "1" Vehicle : VehicleId >
+MonitoringEndpoints ..> VehicleWatch : creates / updates
+MonitoringEndpoints ..> MonitoringAlert : creates
+MonitoringEndpoints ..> Watch : receives / returns
+MonitoringEndpoints ..> Alert : receives / returns
+MonitoringEndpoints ..> SubscriptionPlanQueries : HasPlan("monitoring")
+
+' ---------- Fleet Management ----------
+Fleet "0..*" --> "1" Account : AccountId >
+Fleet "1" -- "0..*" FleetAssignment : groups >
+FleetAssignment "0..1" --> "1" Vehicle : VehicleId >
+ResolutionCase ..|> IOwnedDocument
+ResolutionCase "1" --> "1" CaseResource : stores as JSONB >
+CaseResource "0..*" --> "0..1" VehicleReport : ReportId >
+SubscriptionEntitlementsAdapter ..|> IFleetEntitlements
+SubscriptionEntitlementsAdapter --> ISubscriptionAccessQuery : uses (ACL)
+FleetEndpoints ..> Fleet : creates
+FleetEndpoints ..> FleetAssignment : creates
+FleetEndpoints ..> IFleetEntitlements : checks plan
+FleetEndpoints ..> FleetInput : receives
+FleetEndpoints ..> FleetResource : returns
+FleetEndpoints ..> AssignmentInput : receives
+FleetEndpoints ..> AssignmentResource : returns
+CaseEndpoints ..> ResolutionCase : creates / updates
+CaseEndpoints ..> CaseResource : receives / returns
+FleetModel ..> Fleet : maps
+FleetModel ..> FleetAssignment : maps
+
+@enduml
